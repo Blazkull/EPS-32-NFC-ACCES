@@ -1,0 +1,157 @@
+-- ===============================================================
+-- ⚠️ IMPORTANTE: Ejecuta esto en tu base de datos
+-- ===============================================================
+
+-- ---------------------------------------------------------------
+-- 0. CREAR BASE DE DATOS
+-- ---------------------------------------------------------------
+CREATE DATABASE IF NOT EXISTS db_app_esp32_nfc;
+USE db_app_esp32_nfc;
+
+-- ---------------------------------------------------------------
+-- 1. LIMPIEZA: Eliminar tablas si existen
+-- ---------------------------------------------------------------
+SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS tokens;
+DROP TABLE IF EXISTS logs;
+DROP TABLE IF EXISTS actions_devices;
+DROP TABLE IF EXISTS nfc_cards;
+DROP TABLE IF EXISTS access_pins;
+DROP TABLE IF EXISTS devices;
+DROP TABLE IF EXISTS users;
+SET FOREIGN_KEY_CHECKS = 1;
+
+-- ---------------------------------------------------------------
+-- 2. CREACIÓN DE TABLAS
+-- ---------------------------------------------------------------
+
+-- Tabla users
+CREATE TABLE users (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    username VARCHAR(255) NOT NULL UNIQUE,
+    password VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    status BOOL NOT NULL DEFAULT 1,
+    deleted BOOL NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    last_connection DATETIME NULL
+);
+
+-- Tabla devices
+CREATE TABLE devices (
+    id INT NOT NULL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    status VARCHAR(255) NOT NULL DEFAULT 'desconectado',
+    direction VARCHAR(255),
+    nfc_reader_active BOOL NOT NULL DEFAULT 1,
+    emergency_mode BOOL NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- Tabla nfc_cards
+CREATE TABLE nfc_cards (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    card_uid VARCHAR(255) NOT NULL UNIQUE,
+    id_user INT NOT NULL,
+    card_name VARCHAR(255) NOT NULL,
+    status BOOL NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (id_user) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Tabla access_pins
+CREATE TABLE access_pins (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    id_user INT NOT NULL,
+    pin_code VARCHAR(6) NOT NULL,
+    status BOOL NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (id_user) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Tabla actions_devices
+CREATE TABLE actions_devices (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    id_device INT NOT NULL,
+    action VARCHAR(100) NOT NULL,
+    executed BOOL NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (id_device) REFERENCES devices(id)
+);
+
+-- Tabla logs
+CREATE TABLE logs (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    event VARCHAR(255) NOT NULL,
+    id_device INT NOT NULL,
+    id_user INT,
+    id_action INT,
+    access_type ENUM('nfc', 'pin', 'remote') NOT NULL,
+    timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (id_device) REFERENCES devices(id),
+    FOREIGN KEY (id_user) REFERENCES users(id),
+    FOREIGN KEY (id_action) REFERENCES actions_devices(id)
+);
+
+-- Tabla tokens
+CREATE TABLE tokens (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    id_user INT NOT NULL,
+    token TEXT NOT NULL,
+    status_token BOOL NOT NULL DEFAULT 1,
+    date_token DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expiration DATETIME NOT NULL,
+    FOREIGN KEY (id_user) REFERENCES users(id)
+);
+
+-- ---------------------------------------------------------------
+-- 3. INSERCIÓN DE DATOS DE PRUEBA
+-- ---------------------------------------------------------------
+
+-- Contraseña admin123 hasheada (bcrypt)
+SET @HASHED_PASS = '$2b$12$EjmX48yVf4rF/yZJtqJ3E.FwY8kU1.Vw9R6T2Q6Q6Q6Q6Q6Q6Q6';
+
+INSERT INTO users (name, username, password, email, created_at, updated_at) VALUES
+('Admin Principal', 'admin', @HASHED_PASS, 'admin@iot.com', NOW(), NOW());
+
+-- Insertar dispositivo ESP32
+INSERT INTO devices (id, name, status, direction, nfc_reader_active, emergency_mode) VALUES
+(1, 'ESP32-Controlador-NFC', 'activo', '192.168.1.96', 1, 0);
+
+-- Insertar tarjeta NFC para admin
+INSERT INTO nfc_cards (card_uid, id_user, card_name, status) VALUES
+('11 CD 89 A3', 1, 'Tarjeta Admin Principal', 1);
+
+-- Insertar PIN de acceso para admin
+INSERT INTO access_pins (id_user, pin_code, status) VALUES
+(1, '123456', 1);
+
+-- Insertar acciones para el dispositivo
+INSERT INTO actions_devices (id_device, action, executed) VALUES
+(1, 'LED_ON', 0),
+(1, 'LED_OFF', 0),
+(1, 'MOTOR_IZQ', 0),
+(1, 'MOTOR_DER', 0),
+(1, 'MOTOR_STOP', 0),
+(1, 'DOOR_OPEN', 0),
+(1, 'GARAGE_OPEN', 0);
+
+-- Insertar un log de prueba
+INSERT INTO logs (event, id_device, id_user, access_type, timestamp) VALUES
+('Sistema iniciado', 1, 1, 'remote', NOW());
+
+-- ---------------------------------------------------------------
+-- 4. ÍNDICES PARA MEJOR RENDIMIENTO
+-- ---------------------------------------------------------------
+CREATE INDEX idx_nfc_cards_uid ON nfc_cards(card_uid);
+CREATE INDEX idx_nfc_cards_user ON nfc_cards(id_user);
+CREATE INDEX idx_access_pins_user ON access_pins(id_user);
+CREATE INDEX idx_logs_timestamp ON logs(timestamp);
+CREATE INDEX idx_logs_device ON logs(id_device);
+CREATE INDEX idx_tokens_user ON tokens(id_user);
+CREATE INDEX idx_actions_device ON actions_devices(id_device);
