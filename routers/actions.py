@@ -8,6 +8,7 @@ from models.devices import Device
 from models.logs import Log
 from models.users import User
 from schemas.actions_schema import ActionDeviceCreate, ActionDeviceRead, ActionDeviceUpdate
+from schemas.access_log_schema import AccessLogCreate
 from core.whatsapp_service import whatsapp_service
 
 router = APIRouter(prefix="/actions", tags=["Actions Devices"])
@@ -63,7 +64,7 @@ async def create_action(
     session.commit()
     session.refresh(new_action)
 
-    # <<< NUEVO: Enviar notificación WhatsApp si es apertura de puerta >>>
+    # Enviar notificación WhatsApp si es apertura de puerta
     if data.action in ["DOOR_OPEN", "GARAGE_OPEN"]:
         await enviar_notificacion_whatsapp(data.action, user.id, session)
 
@@ -233,42 +234,76 @@ async def confirm_action_execution(
 
 @router.post("/access-log")
 async def log_access_and_notify(
-    data: dict,
+    data: AccessLogCreate,
     session: Session = Depends(get_session),
 ):
     """
     Endpoint para registrar accesos locales (desde Arduino) y enviar notificaciones WhatsApp
     """
     try:
-        print(f"📥 Log de acceso recibido: {data}")
+        print(f"📥 Log de acceso recibido: {data.dict()}")
         
-        user_id = data.get("id_user", 0)
-        user_name = data.get("user_name", "Usuario Local")
-        action_type = data.get("action", "UNKNOWN")
-        access_type = data.get("access_type", "local")
+        user_id = data.id_user
+        user_name = data.user_name
+        action_type = data.action
+        access_type = data.access_type
         
-        # Determinar nombre de la puerta
+        # Validar que access_type no sea demasiado largo
+        if len(access_type) > 20:
+            access_type = access_type[:20]
+        
+        # Determinar nombre de la puerta y tipo de evento
         door_name = "PUERTA PRINCIPAL" if action_type == "DOOR_OPEN" else "GARAJE"
         
-        # Enviar notificación WhatsApp
-        success = await whatsapp_service.send_access_notification(
-            user_name=user_name,
-            access_type=f"APERTURA {access_type.upper()}",
-            door=door_name
-        )
+        # PRIMERO: Crear acción en actions_devices para tener un id_action (SOLO para aperturas de puertas)
+        action_id = None
+        if action_type in ["DOOR_OPEN", "GARAGE_OPEN"]:
+            new_action = ActionDevice(
+                id_device=data.id_device,
+                action=action_type,
+                executed=True,  # Se marca como ejecutada inmediatamente en accesos locales
+                created_at=datetime.utcnow(),
+            )
+            session.add(new_action)
+            session.flush()  # Para obtener el ID sin hacer commit completo
+            action_id = new_action.id
+            print(f"✅ Acción creada con ID: {action_id}")
         
-        if success:
-            print(f"✅ Notificación WhatsApp enviada para acceso local: {user_name} - {door_name}")
+        # Enviar notificación WhatsApp (solo para aperturas de puertas)
+        success = False
+        if action_type in ["DOOR_OPEN", "GARAGE_OPEN"]:
+            success = await whatsapp_service.send_access_notification(
+                user_name=user_name,
+                access_type=f"APERTURA {access_type.upper()}",
+                door=door_name
+            )
+            
+            if success:
+                print(f"✅ Notificación WhatsApp enviada para acceso local: {user_name} - {door_name}")
+            else:
+                print(f"❌ Error enviando notificación WhatsApp para acceso local")
+        
+        # Crear log en base de datos CON action_id (solo para aperturas de puertas)
+        log_event = ""
+        access_type_log = "local"
+        
+        if action_type == "NFC_ACCESS":
+            log_event = f"Acceso concedido vía NFC - Usuario: {user_name}"
+            access_type_log = "nfc"
+            # Para NFC_ACCESS, no creamos acción en actions_devices, por eso action_id es NULL
+        elif action_type == "DOOR_OPEN":
+            log_event = f"Acceso {access_type}: {user_name} abrió PUERTA PRINCIPAL"
+        elif action_type == "GARAGE_OPEN":
+            log_event = f"Acceso {access_type}: {user_name} abrió GARAJE"
         else:
-            print(f"❌ Error enviando notificación WhatsApp para acceso local")
+            log_event = f"Acceso {access_type}: {user_name} - Acción: {action_type}"
         
-        # Crear log en base de datos
         log = Log(
-            id_device=data.get("id_device", 1),
+            id_device=data.id_device,
             id_user=user_id if user_id != 0 else None,
-            id_action=None,
-            event=f"Acceso {access_type}: {user_name} abrió {door_name}",
-            access_type=access_type
+            id_action=action_id,  # Será NULL para NFC_ACCESS, y tendrá valor para DOOR_OPEN/GARAGE_OPEN
+            event=log_event,
+            access_type=access_type_log
         )
         session.add(log)
         session.commit()
@@ -276,9 +311,11 @@ async def log_access_and_notify(
         return {
             "success": True,
             "message": "Acceso registrado y notificación enviada",
-            "notification_sent": success
+            "notification_sent": success,
+            "action_id": action_id
         }
         
     except Exception as e:
         print(f"❌ Error en log de acceso: {e}")
+        session.rollback()
         raise HTTPException(status_code=500, detail=f"Error procesando acceso: {str(e)}")

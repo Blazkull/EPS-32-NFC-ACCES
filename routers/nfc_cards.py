@@ -120,17 +120,25 @@ def delete_nfc_card(
 @router.post("/validate", response_model=NFCCardValidation)
 async def validate_nfc_card(
     card_uid: str,
-    session: Session = Depends(get_session),  # ✅ SQLAlchemy Session
+    session: Session = Depends(get_session),
+    # <<< REMOVER: user = Depends(get_current_user) >>>
 ):
     """Valida una tarjeta NFC (usado por el ESP32)."""
     
+    print(f"🔍 Validando tarjeta NFC: {card_uid}")
+    
     # ✅ CORREGIDO: Usar session.query() de SQLAlchemy
+    # Buscar tarjeta con o sin espacios
     card = session.query(NFCCard).filter(
-        NFCCard.card_uid == card_uid,
         NFCCard.status == True
+    ).filter(
+        (NFCCard.card_uid == card_uid) | 
+        (NFCCard.card_uid == card_uid.replace(" ", "")) |
+        (NFCCard.card_uid == format_uid_with_spaces(card_uid))
     ).first()
 
     if not card:
+        print(f"❌ Tarjeta no encontrada: {card_uid}")
         return NFCCardValidation(
             valid=False,
             message="Tarjeta no válida o desactivada"
@@ -138,6 +146,7 @@ async def validate_nfc_card(
 
     user = session.query(User).filter(User.id == card.id_user).first()
     if not user or not user.status:
+        print(f"❌ Usuario desactivado: {user.name if user else 'N/A'}")
         return NFCCardValidation(
             valid=False,
             message="Usuario desactivado"
@@ -145,7 +154,7 @@ async def validate_nfc_card(
 
     # Verificar estado del dispositivo
     from models.devices import Device
-    device = session.query(Device).filter(Device.id == 1).first()  # Dispositivo principal
+    device = session.query(Device).filter(Device.id == 1).first()
     if device and not device.nfc_reader_active:
         return NFCCardValidation(
             valid=False,
@@ -162,18 +171,7 @@ async def validate_nfc_card(
     session.add(log)
     session.commit()
 
-    # Notificar por WebSocket al dispositivo
-    try:
-        from core.websocket_manager import manager
-        await manager.send_to_device(1, {
-            "type": "nfc_access",
-            "valid": True,
-            "user_name": user.name,
-            "card_name": card.card_name,
-            "message": f"Bienvenido {user.name}"
-        })
-    except Exception as e:
-        print(f"⚠️ Error notificando acceso NFC: {e}")
+    print(f"✅ Acceso concedido a {user.name} con tarjeta {card.card_name}")
 
     return NFCCardValidation(
         valid=True,
@@ -181,6 +179,13 @@ async def validate_nfc_card(
         user=user,
         message=f"Acceso concedido - Bienvenido {user.name}"
     )
+
+def format_uid_with_spaces(uid: str) -> str:
+    """Formatea UID con espacios cada 2 caracteres"""
+    uid_clean = uid.replace(" ", "")
+    if len(uid_clean) == 8:  # Formato típico de NFC
+        return ' '.join([uid_clean[i:i+2] for i in range(0, len(uid_clean), 2)])
+    return uid
 
 @router.post("/register-card")
 async def register_nfc_card(
