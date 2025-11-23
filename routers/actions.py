@@ -1,14 +1,43 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session  # ✅ SQLAlchemy
+from sqlalchemy.orm import Session
 from datetime import datetime
 from core.database import get_session
 from core.security import get_current_user
 from models.actions_devices import ActionDevice
 from models.devices import Device
 from models.logs import Log
+from models.users import User
 from schemas.actions_schema import ActionDeviceCreate, ActionDeviceRead, ActionDeviceUpdate
+from core.whatsapp_service import whatsapp_service
 
 router = APIRouter(prefix="/actions", tags=["Actions Devices"])
+
+async def enviar_notificacion_whatsapp(action_type: str, user_id: int, session: Session):
+    """Envía notificación por WhatsApp cuando se abre una puerta"""
+    try:
+        # Obtener información del usuario
+        user = session.query(User).filter(User.id == user_id).first()
+        if not user:
+            print("⚠️ Usuario no encontrado para notificación WhatsApp")
+            return
+        
+        user_name = user.name
+        door_name = "PUERTA PRINCIPAL" if action_type == "DOOR_OPEN" else "GARAJE"
+        
+        # Enviar notificación
+        success = await whatsapp_service.send_access_notification(
+            user_name=user_name,
+            access_type="APERTURA REMOTA",
+            door=door_name
+        )
+        
+        if success:
+            print(f"✅ Notificación WhatsApp enviada para {user_name} - {door_name}")
+        else:
+            print(f"❌ Error enviando notificación WhatsApp para {user_name}")
+            
+    except Exception as e:
+        print(f"❌ Error en notificación WhatsApp: {e}")
 
 @router.post("/", response_model=ActionDeviceRead)
 async def create_action(
@@ -19,7 +48,6 @@ async def create_action(
     """Crea una acción para un dispositivo específico."""
     print(f"📥 Datos recibidos: {data.dict()}")
     
-    # ✅ CORREGIDO: Usar session.query() de SQLAlchemy
     device = session.query(Device).filter(Device.id == data.id_device).first()
     if not device:
         raise HTTPException(status_code=404, detail="Dispositivo no encontrado")
@@ -34,6 +62,10 @@ async def create_action(
     session.add(new_action)
     session.commit()
     session.refresh(new_action)
+
+    # <<< NUEVO: Enviar notificación WhatsApp si es apertura de puerta >>>
+    if data.action in ["DOOR_OPEN", "GARAGE_OPEN"]:
+        await enviar_notificacion_whatsapp(data.action, user.id, session)
 
     # Enviar al WebSocket
     from core.websocket_manager import manager
@@ -73,7 +105,6 @@ async def update_action_status(
     user = Depends(get_current_user),
 ):
     """Actualiza el estado (ejecutada) de una acción."""
-    # ✅ CORREGIDO: Usar session.query() de SQLAlchemy
     action = session.query(ActionDevice).filter(ActionDevice.id == action_id).first()
     if not action:
         raise HTTPException(status_code=404, detail="Acción no encontrada")
@@ -122,7 +153,6 @@ def list_actions(
     offset: int = 0,
 ):
     """Obtiene todas las acciones con filtros opcionales."""
-    # ✅ CORREGIDO: Usar session.query() de SQLAlchemy
     query = session.query(ActionDevice)
     if id_device:
         query = query.filter(ActionDevice.id_device == id_device)
@@ -139,7 +169,6 @@ def get_action(
     user = Depends(get_current_user),
 ):
     """Obtiene una acción específica por su ID."""
-    # ✅ CORREGIDO: Usar session.query() de SQLAlchemy
     action = session.query(ActionDevice).filter(ActionDevice.id == action_id).first()
     if not action:
         raise HTTPException(status_code=404, detail="Acción no encontrada")
@@ -152,7 +181,6 @@ def delete_action(
     user = Depends(get_current_user),
 ):
     """Elimina una acción por su ID."""
-    # ✅ CORREGIDO: Usar session.query() de SQLAlchemy
     action = session.query(ActionDevice).filter(ActionDevice.id == action_id).first()
     if not action:
         raise HTTPException(status_code=404, detail="Acción no encontrada")
@@ -170,7 +198,6 @@ async def confirm_action_execution(
     Endpoint llamado por el IoT (ESP32, Arduino, etc.)
     cuando confirma que la acción fue ejecutada físicamente.
     """
-    # ✅ CORREGIDO: Usar session.query() de SQLAlchemy
     action = session.query(ActionDevice).filter(ActionDevice.id == action_id).first()
     if not action:
         raise HTTPException(status_code=404, detail="Acción no encontrada")
@@ -203,3 +230,55 @@ async def confirm_action_execution(
         print(f"⚠️ Error al broadcast confirmación: {e}")
 
     return {"message": "Acción confirmada por el dispositivo", "action_id": action.id}
+
+@router.post("/access-log")
+async def log_access_and_notify(
+    data: dict,
+    session: Session = Depends(get_session),
+):
+    """
+    Endpoint para registrar accesos locales (desde Arduino) y enviar notificaciones WhatsApp
+    """
+    try:
+        print(f"📥 Log de acceso recibido: {data}")
+        
+        user_id = data.get("id_user", 0)
+        user_name = data.get("user_name", "Usuario Local")
+        action_type = data.get("action", "UNKNOWN")
+        access_type = data.get("access_type", "local")
+        
+        # Determinar nombre de la puerta
+        door_name = "PUERTA PRINCIPAL" if action_type == "DOOR_OPEN" else "GARAJE"
+        
+        # Enviar notificación WhatsApp
+        success = await whatsapp_service.send_access_notification(
+            user_name=user_name,
+            access_type=f"APERTURA {access_type.upper()}",
+            door=door_name
+        )
+        
+        if success:
+            print(f"✅ Notificación WhatsApp enviada para acceso local: {user_name} - {door_name}")
+        else:
+            print(f"❌ Error enviando notificación WhatsApp para acceso local")
+        
+        # Crear log en base de datos
+        log = Log(
+            id_device=data.get("id_device", 1),
+            id_user=user_id if user_id != 0 else None,
+            id_action=None,
+            event=f"Acceso {access_type}: {user_name} abrió {door_name}",
+            access_type=access_type
+        )
+        session.add(log)
+        session.commit()
+        
+        return {
+            "success": True,
+            "message": "Acceso registrado y notificación enviada",
+            "notification_sent": success
+        }
+        
+    except Exception as e:
+        print(f"❌ Error en log de acceso: {e}")
+        raise HTTPException(status_code=500, detail=f"Error procesando acceso: {str(e)}")
