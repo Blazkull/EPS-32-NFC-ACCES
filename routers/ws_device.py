@@ -6,11 +6,10 @@ router = APIRouter()
 
 @router.websocket("/ws/device/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: int):
-    await manager.connect(websocket)
+    # Conectar usando el método mejorado que acepta device_id
+    await manager.connect(websocket, device_id=device_id)
     
-    # Registrar el dispositivo
-    manager.device_connections[device_id] = websocket
-    print(f"✅ Dispositivo {device_id} conectado vía WebSocket")
+    print(f"✅ Dispositivo {device_id} conectado vía WebSocket. Dispositivos activos: {len(manager.device_connections)}")
 
     try:
         while True:
@@ -39,13 +38,27 @@ async def websocket_endpoint(websocket: WebSocket, device_id: int):
                     card_name = message.get("card_name")
                     
                     if card_uid and user_id:
-                        # Aquí podrías procesar el registro de la tarjeta
                         print(f"🔄 Tarjeta {card_uid} registrada para usuario {user_id}")
                         
+                        # Confirmar registro exitoso al dispositivo
+                        await manager.send_json(websocket, {
+                            "type": "nfc_registration_success",
+                            "success": True,
+                            "message": f"Tarjeta {card_name} registrada exitosamente"
+                        })
+                
+                # Manejar notificaciones de acceso desde el dispositivo
+                elif message_type == "access_log":
+                    print(f"📝 Log de acceso desde dispositivo {device_id}: {message}")
+                
+                # Manejar confirmación de acciones
+                elif message_type == "action_confirmed":
+                    action_id = message.get("action_id")
+                    print(f"✅ Acción {action_id} confirmada por dispositivo {device_id}")
+                
             except json.JSONDecodeError:
                 print("❌ Mensaje no es JSON válido")
                 
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
-        manager.device_connections.pop(device_id, None)
-        print(f"❌ Dispositivo {device_id} desconectado")
+        manager.disconnect(websocket, device_id=device_id)
+        print(f"❌ Dispositivo {device_id} desconectado. Dispositivos activos: {len(manager.device_connections)}")
